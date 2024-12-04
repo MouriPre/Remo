@@ -1,0 +1,268 @@
+local AimToggle = TeamSection:AddToggle("AIToggle", {
+    Title = "Aimbot",
+    Default = Configuration.AI
+})
+
+-- Định nghĩa các biến ở phạm vi rộng hơn
+local AimbotEnabled = false
+local connection
+local FOVCircle
+local IgnoreWalls = false
+
+-- Thêm các biến mới
+local FOVRadius = 100
+local currentAimbotRange = 100
+local minTargetHealth = 0
+local FOVOffset = Vector2.new(0, 0)
+local AimbotSpeed = 1
+local TeamCheck = false
+local WallcheckEnabled = true  -- Thêm biến mới cho wallcheck
+
+-- Thêm ColorPicker cho FOV
+local FovColorPicker = TeamSection:AddColorpicker("FovColor", {
+    Title = "Màu Fov",
+    Default = Color3.new(1, 1, 1)
+})
+
+-- Thêm Dropdown cho khoảng Aimbot
+local AimbotRangeDropdown = TeamSection:AddDropdown("AimbotRange", {
+    Title = "Khoảng cách Aimbot",
+    Values = {"Aimbot Bình Thường", "Aimbot Xa", "Aimbot Gần"},
+    Default = "Aimbot Xa",
+})
+
+local currentAimbotRange = 200  -- Giá trị mặc định, tương ứng với "Aimbot Xa"
+
+local AimbotRanges = {
+    ["Aimbot Max Xa"] = math.huge,
+    ["Aimbot Xa 2000M"] = 2000,
+    ["Aimbot Gần 200M"] = 200
+}
+
+-- Thêm Slider cho máu mục tiêu tối thiểu
+local TargetHealthSlider = TeamSection:AddSlider("TargetHealth", {
+    Title = "Aimbot theo lượng máu",
+    Default = 0,
+    Min = 0,
+    Max = 100,
+    Rounding = 0,
+    ValueName = "%"
+})
+
+-- Thêm Toggle để hiển thị FOV
+local ShowFovToggle = TeamSection:AddToggle("ShowFov", {
+    Title = "Hiện vòng Fov",
+    Default = true
+})
+
+-- Thêm Slider cho kích thước FOV
+local FOVSizeSlider = TeamSection:AddSlider("FOVSize", {
+    Title = "Kích thước Fov",
+    Default = 100,
+    Min = 10,
+    Max = 500,
+    Rounding = 0,
+    ValueName = "px"
+})
+
+-- Thêm Slider cho vị trí FOV theo chiều ngang
+local FOVHorizontalSlider = TeamSection:AddSlider("FOVHorizontal", {
+    Title = "Trái phải Fov",
+    Default = 0,
+    Min = -500,
+    Max = 500,
+    Rounding = 0,
+    ValueName = "px"
+})
+
+-- Thêm Slider cho vị trí FOV theo chiều dọc
+local FOVVerticalSlider = TeamSection:AddSlider("FOVVertical", {
+    Title = "Cao thấp Fov",
+    Default = 0,
+    Min = -500,
+    Max = 500,
+    Rounding = 0,
+    ValueName = "px"
+})
+
+-- Thêm Slider cho tốc độ Aimbot
+local AimbotSpeedSlider = TeamSection:AddSlider("AimbotSpeed", {
+    Title = "Tốc độ Aimbot",
+    Default = 1,
+    Min = 0.1,
+    Max = 50,
+    Rounding = 1,
+    ValueName = "x"
+})
+
+-- Thêm Toggle cho Team Check
+local TeamCheckToggle = TeamSection:AddToggle("TeamCheck", {
+    Title = "Team Check",
+    Default = false
+})
+
+-- Thêm Toggle cho Wallcheck
+local WallcheckToggle = TeamSection:AddToggle("WallcheckToggle", {
+    Title = "Wallcheck",
+    Default = true
+})
+
+AimToggle:OnChanged(function(Value)
+    Configuration.AimbotEnabled = Value
+    AimbotEnabled = Value
+
+    if Value then
+        -- Đảm bảo Camera được định nghĩa
+        local Camera = workspace.CurrentCamera
+        if not Camera then return end
+
+        -- Tạo FOV Circle
+        FOVCircle = Drawing.new("Circle")
+        FOVCircle.Visible = ShowFovToggle.Value
+        FOVCircle.Thickness = 1
+        FOVCircle.Color = FovColorPicker.Value
+        FOVCircle.Filled = false
+        FOVCircle.Transparency = 1
+        FOVCircle.NumSides = 60
+        FOVCircle.Radius = FOVRadius
+
+        -- Cập nhật vị trí FOV Circle
+        local function UpdateFOVCircle()
+            if Camera and Camera.ViewportSize then
+                FOVCircle.Position = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y / 2) + FOVOffset
+            end
+        end
+
+        -- Kiểm tra xem mục tiêu có trong FOV không
+        local function IsInFOV(position)
+            if not Camera then return false end
+            local screenPosition, onScreen = Camera:WorldToScreenPoint(position)
+            if not onScreen then return false end
+            
+            local screenCenter = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y / 2) + FOVOffset
+            return (Vector2.new(screenPosition.X, screenPosition.Y) - screenCenter).Magnitude <= FOVRadius
+        end
+
+        -- Hàm kiểm tra tầm nhìn
+        local function HasLineOfSight(target)
+            if not WallcheckEnabled then return true end
+            local ray = Ray.new(Camera.CFrame.Position, (target.Position - Camera.CFrame.Position).Unit * 1000)
+            local part, position = workspace:FindPartOnRayWithIgnoreList(ray, {game.Players.LocalPlayer.Character})
+            return part == target or (position - target.Position).Magnitude < 5
+        end
+
+        -- Lấy đầu của người chơi gần nhất trong FOV và có tầm nhìn
+        local function GetClosestPlayerHead()
+            local closestPlayer = nil
+            local shortestDistance = math.huge
+            local localPlayer = game.Players.LocalPlayer
+
+            for _, player in pairs(game.Players:GetPlayers()) do
+                if player ~= localPlayer and player.Character and player.Character:FindFirstChild("Head") and player.Character:FindFirstChild("Humanoid") then
+                    local head = player.Character.Head
+                    local humanoid = player.Character.Humanoid
+                    
+                    if (not TeamCheck or player.Team ~= localPlayer.Team) and
+                       IsInFOV(head.Position) and 
+                       humanoid.Health > 0 and
+                       humanoid.Health >= minTargetHealth and
+                       HasLineOfSight(head) then
+                        
+                        local distance = (head.Position - Camera.CFrame.Position).Magnitude
+                        if distance <= currentAimbotRange and distance < shortestDistance then
+                            closestPlayer = player
+                            shortestDistance = distance
+                        end
+                    end
+                end
+            end
+
+            return closestPlayer and closestPlayer.Character.Head
+        end
+
+-- Hàm Aimbot
+        local function Aimbot()
+            local targetHead = GetClosestPlayerHead()
+            if targetHead and Camera then
+                local targetPos = targetHead.Position
+                local currentCFrame = Camera.CFrame
+                local targetCFrame = CFrame.new(currentCFrame.Position, targetPos)
+                Camera.CFrame = currentCFrame:Lerp(targetCFrame, AimbotSpeed * 0.1)
+            end
+        end
+
+        -- Loop chính
+        if connection then connection:Disconnect() end
+        connection = game:GetService("RunService").RenderStepped:Connect(function()
+            if AimbotEnabled then
+                UpdateFOVCircle()
+                Aimbot()
+            end
+        end)
+    else
+        -- Logic khi tắt Aimbot
+        if connection then
+            connection:Disconnect()
+            connection = nil
+        end
+        if FOVCircle then
+            FOVCircle:Remove()
+            FOVCircle = nil
+        end
+    end
+end)
+
+-- Xử lý các sự kiện cho các phần tử UI
+FovColorPicker:OnChanged(function(Value)
+    if FOVCircle then
+        FOVCircle.Color = Value
+    end
+end)
+
+AimbotRangeDropdown:OnChanged(function(Value)
+    currentAimbotRange = AimbotRanges[Value] or math.huge
+end)
+
+TargetHealthSlider:OnChanged(function(Value)
+    minTargetHealth = Value
+end)
+
+ShowFovToggle:OnChanged(function(Value)
+    if FOVCircle then
+        FOVCircle.Visible = Value
+    end
+end)
+
+FOVSizeSlider:OnChanged(function(Value)
+    FOVRadius = Value
+    if FOVCircle then
+        FOVCircle.Radius = Value
+    end
+end)
+
+FOVHorizontalSlider:OnChanged(function(Value)
+    FOVOffset = Vector2.new(Value, FOVOffset.Y)
+    if FOVCircle then
+        UpdateFOVCircle()
+    end
+end)
+
+FOVVerticalSlider:OnChanged(function(Value)
+    FOVOffset = Vector2.new(FOVOffset.X, Value)
+    if FOVCircle then
+        UpdateFOVCircle()
+    end
+end)
+
+AimbotSpeedSlider:OnChanged(function(Value)
+    AimbotSpeed = Value
+end)
+
+TeamCheckToggle:OnChanged(function(Value)
+    TeamCheck = Value
+end)
+
+-- Thêm xử lý sự kiện cho WallcheckToggle
+WallcheckToggle:OnChanged(function(Value)
+    WallcheckEnabled = Value
+end)
